@@ -66,6 +66,9 @@
 ## **7. 相关文献**
 * Cheng, Heng-Tze, et al. "Wide & deep learning for recommender systems." Proceedings of the 1st workshop on deep learning for recommender systems. 2016.
 
+
+
+# 当前lr被更改为0.01
    
 
 

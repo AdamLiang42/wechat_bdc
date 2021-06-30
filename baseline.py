@@ -4,21 +4,26 @@ import os
 import time
 import numpy as np
 import pandas as pd
-import tensorflow.compat.v1 as tf
+import tensorflow.compat.v1 as tf1
+import tensorflow as tf
 from tensorflow import feature_column as fc
 from comm import ACTION_LIST, STAGE_END_DAY, FEA_COLUMN_LIST
 from evaluation import uAUC, compute_weighted_score
+import sys
+import warnings
+warnings.filterwarnings("ignore")
 
-
-flags = tf.app.flags
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
+flags = tf1.app.flags
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('model_checkpoint_dir', './data/model', 'model dir')
 flags.DEFINE_string('root_path', './data/', 'data dir')
 flags.DEFINE_integer('batch_size', 128, 'batch_size')
 flags.DEFINE_integer('embed_dim', 10, 'embed_dim')
-flags.DEFINE_float('learning_rate', 0.1, 'learning_rate')
+flags.DEFINE_float('learning_rate', 0.01, 'learning_rate')
 flags.DEFINE_float('embed_l2', None, 'embedding l2 reg')
+flags.DEFINE_float('epochs', 10, 'embedding l2 reg')
 
 SEED = 2021
 
@@ -26,7 +31,7 @@ SEED = 2021
 
 class WideAndDeep(object):
 
-    def __init__(self, linear_feature_columns, dnn_feature_columns, stage, action):
+    def __init__(self, linear_feature_columns, dnn_feature_columns, stage, action, epochs):
         """
         :param linear_feature_columns: List of tensorflow feature_column
         :param dnn_feature_columns: List of tensorflow feature_column
@@ -34,14 +39,16 @@ class WideAndDeep(object):
         :param action: String. Including "read_comment"/"like"/"click_avatar"/"favorite"/"forward"/"comment"/"follow"
         """
         super(WideAndDeep, self).__init__()
-        self.num_epochs_dict = {"read_comment": 1, "like": 1, "click_avatar": 1, "favorite": 1, "forward": 1,
-                                "comment": 1, "follow": 1}
+        epochs = int(FLAGS.epochs)
+        epochs = int(epochs)
+        self.num_epochs_dict = {"read_comment": epochs, "like": epochs, "click_avatar": epochs, "favorite": epochs, 
+                                "forward": epochs, "comment": epochs, "follow": epochs}
         self.estimator = None
         self.linear_feature_columns = linear_feature_columns
         self.dnn_feature_columns = dnn_feature_columns
         self.stage = stage
         self.action = action
-        tf.logging.set_verbosity(tf.logging.INFO)
+        #tf1.logging.set_verbosity(tf.logging.INFO)
 
     def build_estimator(self):
         if self.stage in ["evaluate", "offline_train"]:
@@ -55,8 +62,8 @@ class WideAndDeep(object):
         elif self.stage in ["online_train", "offline_train"]:
             # 训练时如果模型目录已存在，则清空目录
             del_file(model_checkpoint_stage_dir)
-        optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.learning_rate, beta1=0.9, beta2=0.999,
-                                           epsilon=1)
+        # optimizer = tf.keras.optimizers.Adam(learning_rate=FLAGS.learning_rate, beta1=0.9, beta2=0.999, epsilon=1)
+        optimizer = tf.keras.optimizers.Adam(learning_rate=FLAGS.learning_rate)
         config = tf.estimator.RunConfig(model_dir=model_checkpoint_stage_dir, tf_random_seed=SEED)
         self.estimator = tf.estimator.DNNLinearCombinedClassifier(
             model_dir=model_checkpoint_stage_dir,
@@ -77,10 +84,10 @@ class WideAndDeep(object):
         :param num_epochs: Int. Epochs num
         :return: tf.data.Dataset object. 
         '''
-        print(df.shape)
-        print(df.columns)
-        print("batch_size: ", batch_size)
-        print("num_epochs: ", num_epochs)
+        #print(df.shape)
+        #print(df.columns)
+        #print("batch_size: ", batch_size)
+        #print("num_epochs: ", num_epochs)
         if stage != "submit":
             label = df[action]
             ds = tf.data.Dataset.from_tensor_slices((dict(df), label))
@@ -108,20 +115,31 @@ class WideAndDeep(object):
                                                                       day=STAGE_END_DAY[self.stage])
         stage_dir = os.path.join(FLAGS.root_path, self.stage, file_name)
         df = pd.read_csv(stage_dir)
+        
+        '''
         self.estimator.train(
             input_fn=lambda: self.input_fn_train(df, self.stage, self.action, self.num_epochs_dict[self.action])
         )
+        '''        
+        #for eporch in range (self.num_epochs_dict[self.action]):
+        train_spec = tf.estimator.TrainSpec(input_fn=lambda:self.input_fn_train(df, self.stage, self.action, self.num_epochs_dict[self.action]), max_steps=100)
+        eval_spec = tf.estimator.EvalSpec(input_fn=lambda:self.input_fn_predict(df, self.stage, self.action))
+        tf.estimator.train_and_evaluate(self.estimator, train_spec, eval_spec)
+    
+        
 
     def evaluate(self):
         """
         评估单个行为的uAUC值
         """
+
         if self.stage in ["online_train", "offline_train"]:
             # 训练集，每个action一个文件
             action = self.action
         else:
             # 测试集，所有action在同一个文件
             action = "all"
+        # set action to all in all cases for now to validation purposes
         file_name = "{stage}_{action}_{day}_concate_sample.csv".format(stage=self.stage, action=action,
                                                                       day=STAGE_END_DAY[self.stage])
         evaluate_dir = os.path.join(FLAGS.root_path, self.stage, file_name)
@@ -211,6 +229,7 @@ def main(argv):
     t = time.time() 
     dnn_feature_columns, linear_feature_columns = get_feature_columns()
     stage = argv[1]
+    epoch_size = argv[1]
     print('Stage: %s'%stage)
     eval_dict = {}
     predict_dict = {}
@@ -218,7 +237,7 @@ def main(argv):
     ids = None
     for action in ACTION_LIST:
         print("Action:", action)
-        model = WideAndDeep(linear_feature_columns, dnn_feature_columns, stage, action)
+        model = WideAndDeep(linear_feature_columns, dnn_feature_columns, stage, action, epoch_size)
         model.build_estimator()
 
         if stage in ["online_train", "offline_train"]:
@@ -261,13 +280,15 @@ def main(argv):
         res.to_csv(submit_file, index=False)
 
     if stage == "submit":
-        print('不同目标行为2000条样本平均预测耗时（毫秒）：')
+        #print('不同目标行为2000条样本平均预测耗时（毫秒）：')
         print(predict_time_cost)
-        print('单个目标行为2000条样本平均预测耗时（毫秒）：')
-        print(np.mean([v for v in predict_time_cost.values()]))
-    print('Time cost: %.2f s'%(time.time()-t))
+        #print('单个目标行为2000条样本平均预测耗时（毫秒）：')
+        #print(np.mean([v for v in predict_time_cost.values()]))
+    #print('Time cost: %.2f s'%(time.time()-t))
 
 
 if __name__ == "__main__":
-    tf.app.run(main)
+    args = sys.argv[:]
+    print(args)
+    main(args)
     
